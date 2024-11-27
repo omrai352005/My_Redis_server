@@ -1,4 +1,5 @@
 package My_Redis_server;
+
 import java.io.*;
 import java.net.*;
 import java.util.HashMap;
@@ -8,22 +9,101 @@ public class RedisServer {
     private static ServerSocket serverSocket;
     private static final HashMap<String, String> dataStore = new HashMap<>(); 
     private static final Map<String, Long> expiryMap = new HashMap<>();
+    private static String dir;
+    private static String dbfilename;
 
-    public static void main(String[] args) {
-        try {
-            int port = 8000;
-            serverSocket = new ServerSocket(port);
-            System.out.println("Redis server is running on port " + port);
+    public RedisServer(String dir, String dbfilename) {
+    this.dir = dir;
+    this.dbfilename = dbfilename;
 
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("New client connected: " + clientSocket.getInetAddress());
-                new Thread(() -> handleClient(clientSocket)).start();
-            }
-        } catch (IOException e) {
-            System.out.println("Server stopped: " + e.getMessage());
+    // Load existing RDB file, if present
+    loadRDB();
+}
+private void loadRDB() {
+    File rdbFile = new File(dir, dbfilename);
+    if (!rdbFile.exists()) {
+        System.out.println("RDB file not found. Starting with an empty database.");
+        return;
+    }
+
+    try (DataInputStream in = new DataInputStream(new FileInputStream(rdbFile))) {
+        while (in.available() > 0) {
+            int keyLength = in.readInt(); // Read key length (big-endian)
+            byte[] keyBytes = new byte[keyLength];
+            in.readFully(keyBytes);
+            String key = new String(keyBytes);
+
+            int valueLength = in.readInt(); // Read value length (big-endian)
+            byte[] valueBytes = new byte[valueLength];
+            in.readFully(valueBytes);
+            String value = new String(valueBytes);
+
+            dataStore.put(key, value); // Load into in-memory store
+        }
+        System.out.println("RDB file loaded successfully.");
+    } catch (IOException e) {
+        System.err.println("Error reading RDB file: " + e.getMessage());
+    }
+}
+private static void saveRDB() {
+    File rdbFile = new File(dir, dbfilename);
+    try (DataOutputStream dos = new DataOutputStream(new FileOutputStream(rdbFile))) {
+        // Write the number of keys
+        dos.writeInt(dataStore.size());
+        for (Map.Entry<String, String> entry : dataStore.entrySet()) {
+            // Write the key and value
+            writeString(dos, entry.getKey());
+            writeString(dos, entry.getValue());
+        }
+        System.out.println("RDB file saved successfully.");
+    } catch (IOException e) {
+        System.err.println("Error saving RDB file: " + e.getMessage());
+    }
+}
+private static void writeString(DataOutputStream dos, String str) throws IOException {
+    dos.writeInt(str.length());
+    dos.writeBytes(str);
+}
+
+private static String readString(DataInputStream dis) throws IOException {
+    int length = dis.readInt();
+    byte[] bytes = new byte[length];
+    dis.readFully(bytes);
+    return new String(bytes);
+}
+
+
+public static void main(String[] args) {
+    String dir = "E:/myRedis-data"; // Default directory
+    String dbfilename = "dumb.rdb";  // Default RDB filename
+
+    // Parse command-line arguments
+    for (int i = 0; i < args.length; i++) {
+        if (args[i].equals("--dir") && i + 1 < args.length) {
+            dir = args[i + 1];
+        } else if (args[i].equals("--dbfilename") && i + 1 < args.length) {
+            dbfilename = args[i + 1];
         }
     }
+
+    System.out.println("Starting Redis server with dir: " + dir + ", dbfilename: " + dbfilename);
+
+    try {
+        int port = 8000;
+        serverSocket = new ServerSocket(port);
+        System.out.println("Redis server is running on port " + port);
+
+        RedisServer server = new RedisServer(dir, dbfilename);
+
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            System.out.println("New client connected: " + clientSocket.getInetAddress());
+            new Thread(() -> server.handleClient(clientSocket)).start();
+        }
+    } catch (IOException e) {
+        System.out.println("Server stopped: " + e.getMessage());
+    }
+}
 
     private static void handleClient(Socket clientSocket) {
         try (
@@ -79,7 +159,7 @@ public class RedisServer {
                 }
                 break;
             
-                case "SET":
+            case "SET":
                 if (commandParts.length >= 3) {
                     String key = commandParts[1];
                     String value = commandParts[2];
@@ -92,6 +172,15 @@ public class RedisServer {
                             expiryMap.put(key, System.currentTimeMillis() + expiryMillis);
                         } catch (NumberFormatException e) {
                             out.write("-ERR PX argument must be a number\r\n".getBytes());
+                            break;
+                        }
+                    }
+                    else if (commandParts.length == 5 && commandParts[3].equalsIgnoreCase("EX")) {
+                        try {
+                            long expiryMillis = Long.parseLong(commandParts[4])*1000;
+                            expiryMap.put(key, System.currentTimeMillis() + expiryMillis);
+                        } catch (NumberFormatException e) {
+                            out.write("-ERR EX argument must be a number\r\n".getBytes());
                             break;
                         }
                     }
@@ -121,6 +210,36 @@ public class RedisServer {
                 } else {
                     out.write("-ERR Wrong number of arguments for 'GET'\r\n".getBytes());
                 }
+                break;
+            case "DEL":
+                if(commandParts.length== 2){
+                  String key = commandParts[1];
+                  if(dataStore.containsKey(key)){
+                    dataStore.remove(key);
+                    }
+                  out.write("+OK\r\n".getBytes());
+                }
+                else {
+                    out.write("-ERR Wrong number of arguments for 'DEL'\r\n".getBytes());
+                }
+                break;
+            case "CONFIG":
+                if (commandParts.length == 3 && commandParts[1].equalsIgnoreCase("GET")) {
+                    String param = commandParts[2];
+                    if (param.equals("dir")) {
+                        out.write(("*2\r\n$3\r\ndir\r\n$" + dir.length() + "\r\n" + dir + "\r\n").getBytes());
+                    } else if (param.equals("dbfilename")) {
+                        out.write(("*2\r\n$10\r\ndbfilename\r\n$" + dbfilename.length() + "\r\n" + dbfilename + "\r\n").getBytes());
+                    } else {
+                        out.write("*0\r\n".getBytes()); // Empty array for unknown parameters
+                    }
+                } else {
+                    out.write("-ERR Syntax error in CONFIG command\r\n".getBytes());
+                }
+                break;
+            case"SAVE":
+                saveRDB();
+                out.write("+OK\r\n".getBytes());
                 break;
             
             default:
