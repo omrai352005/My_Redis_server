@@ -17,34 +17,41 @@ public class RedisServer {
     this.dbfilename = dbfilename;
 
     // Load existing RDB file, if present
-    loadRDB();
+    loadRDB(dir , dbfilename);
 }
-private void loadRDB() {
-    File rdbFile = new File(dir, dbfilename);
+private static void loadRDB(String dir, String dbFilename) {
+    File rdbFile = new File(dir, dbFilename);
     if (!rdbFile.exists()) {
         System.out.println("RDB file not found. Starting with an empty database.");
         return;
     }
 
-    try (DataInputStream in = new DataInputStream(new FileInputStream(rdbFile))) {
-        while (in.available() > 0) {
-            int keyLength = in.readInt(); // Read key length (big-endian)
-            byte[] keyBytes = new byte[keyLength];
-            in.readFully(keyBytes);
-            String key = new String(keyBytes);
-
-            int valueLength = in.readInt(); // Read value length (big-endian)
-            byte[] valueBytes = new byte[valueLength];
-            in.readFully(valueBytes);
-            String value = new String(valueBytes);
-
-            dataStore.put(key, value); // Load into in-memory store
+    try (FileInputStream fis = new FileInputStream(rdbFile)) {
+        while (fis.available() > 0) {
+            String key = readLengthPrefixedString(fis);
+            String value = readLengthPrefixedString(fis);
+            dataStore.put(key, value); // Populate the in-memory datastore
         }
         System.out.println("RDB file loaded successfully.");
     } catch (IOException e) {
         System.err.println("Error reading RDB file: " + e.getMessage());
     }
 }
+
+private static String readLengthPrefixedString(InputStream inputStream) throws IOException {
+    int length = inputStream.read(); // Read the length prefix
+    if (length == -1) throw new EOFException("Unexpected end of file while reading string length");
+    byte[] stringBytes = new byte[length];
+    int bytesRead = inputStream.read(stringBytes);
+    if (bytesRead != length) {
+        throw new IOException("Failed to read the expected number of bytes for string");
+    }
+    return new String(stringBytes);
+}
+
+
+
+
 private static void saveRDB() {
     File rdbFile = new File(dir, dbfilename);
     try (DataOutputStream dos = new DataOutputStream(new FileOutputStream(rdbFile))) {
@@ -76,7 +83,7 @@ private static String readString(DataInputStream dis) throws IOException {
 public static void main(String[] args) {
     String dir = "E:/myRedis-data"; // Default directory
     String dbfilename = "dumb.rdb";  // Default RDB filename
-
+    int port = 8000; 
     // Parse command-line arguments
     for (int i = 0; i < args.length; i++) {
         if (args[i].equals("--dir") && i + 1 < args.length) {
@@ -84,12 +91,15 @@ public static void main(String[] args) {
         } else if (args[i].equals("--dbfilename") && i + 1 < args.length) {
             dbfilename = args[i + 1];
         }
+        else if(args[i].equals("--port")&& i+1<args.length){
+            port = Integer.parseInt(args[i+1]); 
+        }
     }
 
     System.out.println("Starting Redis server with dir: " + dir + ", dbfilename: " + dbfilename);
 
     try {
-        int port = 8000;
+        
         serverSocket = new ServerSocket(port);
         System.out.println("Redis server is running on port " + port);
 
@@ -149,6 +159,9 @@ public static void main(String[] args) {
         switch (command) {
             case "PING":
                 out.write("+PONG\r\n".getBytes());
+                break;
+            case "INFO":
+                out.write("+role: master\r\n".getBytes());
                 break;
             case "ECHO":
                 if (commandParts.length == 2) {
@@ -241,6 +254,27 @@ public static void main(String[] args) {
                 saveRDB();
                 out.write("+OK\r\n".getBytes());
                 break;
+            
+            case "KEYS":
+                if (commandParts.length == 2 && commandParts[1].equals("*")) {
+                    if (dataStore.isEmpty()) {
+                        out.write("*0\r\n".getBytes()); // Empty array
+                    } else {
+                        StringBuilder response = new StringBuilder();
+                        response.append("*").append(dataStore.size()).append("\r\n"); 
+                        for (String key : dataStore.keySet()) {
+                            response.append("$").append(key.length()).append("\r\n").append(key).append("\r\n");
+                        }
+                        out.write(response.toString().getBytes());
+                    }
+                } else {
+                    out.write("-ERR Wrong number of arguments or invalid pattern for 'KEYS'\r\n".getBytes());
+                }
+                break;
+                
+            
+            
+            
             
             default:
                 out.write(("-ERR Unknown Command '" + command + "'\r\n").getBytes());
